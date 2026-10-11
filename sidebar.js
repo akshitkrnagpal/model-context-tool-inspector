@@ -42,6 +42,7 @@ const suggestUserPromptCheckbox = document.getElementById('suggestUserPromptChec
 })();
 
 let currentTools = [];
+let currentToolsUrl;
 
 let userPromptPendingId = 0;
 let lastSuggestedUserPrompt = '';
@@ -57,16 +58,19 @@ chrome.runtime.onMessage.addListener(async ({ message, tools, url, type, tabId }
   // Ignore errors about other tabs, e.g. the mic permission popup window.
   if (tabId && tabId !== tab.id) return;
 
+  const haveNewTools = JSON.stringify(currentTools) !== JSON.stringify(tools);
+  statusDiv.textContent = message;
+  statusDiv.hidden = !message;
+  // Badge/navigation updates can broadcast the same tools while the user is
+  // choosing a tool or editing arguments. Keep those controls intact.
+  if (!message && tools?.length && !haveNewTools && url === currentToolsUrl) return;
+
   tbody.innerHTML = '';
   thead.innerHTML = '';
   toolNames.innerHTML = '';
 
-  statusDiv.textContent = message;
-  statusDiv.hidden = !message;
-
-  const haveNewTools = JSON.stringify(currentTools) !== JSON.stringify(tools);
-
   currentTools = tools;
+  currentToolsUrl = url;
   if (haveNewTools) updateLiveTools();
 
   if (!tools || tools.length === 0) {

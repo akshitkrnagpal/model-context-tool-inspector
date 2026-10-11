@@ -115,6 +115,29 @@ function watch(page, label) {
 }
 context.on('page', (p) => watch(p, 'spawned'));
 
+// An unrelated iframe must not initialize WebMCP just because the inspector
+// is installed. Chrome 155 kills its renderer when a detached document probe
+// subsequently tries to bind WebMCP on the same frame (bad-message reason 346).
+const detachedDemo = await context.newPage();
+let detachedCrashed = false;
+detachedDemo.on('crash', () => { detachedCrashed = true; });
+try {
+  await detachedDemo.goto(`${BASE}/detached-document.html`);
+  await detachedDemo.frameLocator('iframe').locator('#probe-complete').waitFor();
+  const result = await sw.evaluate(async (url) => {
+    const [tab] = await chrome.tabs.query({ url });
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    const frame = frames.find(frame => frame.url.endsWith('/detached-frame.html'));
+    return chrome.tabs.sendMessage(tab.id, { action: 'GET_CROSS_DOCUMENT_SCRIPT_TOOL_RESULT' }, { frameId: frame.frameId });
+  }, `${BASE}/detached-document.html`);
+  check('reading cross-document results does not initialize WebMCP', result === '"detached-result"');
+  await detachedDemo.waitForTimeout(500);
+} catch (error) {
+  check('detached-document iframe remains usable', false, error.message);
+}
+check('detached-document iframe does not crash renderer', !detachedCrashed);
+await detachedDemo.close();
+
 const demo = context.pages()[0];
 watch(demo, 'demo');
 await demo.goto(`${BASE}/page1.html`);
@@ -125,6 +148,13 @@ await demo.waitForLoadState('load');
 // tab it is attached to; sidePanel.open() needs a user gesture we cannot
 // produce here). Everything else, messaging included, is real.
 const demoTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, `${BASE}/page1.html`);
+// Reinjection must leave one usable listener, rather than redeclaring global
+// bindings or duplicating message handlers.
+await sw.evaluate(async (tabId) => {
+  for (let i = 0; i < 2; i++) {
+    await chrome.scripting.executeScript({ target: { tabId }, files: ['content.js'] });
+  }
+}, demoTabId);
 const sidebar = await context.newPage();
 await sidebar.addInitScript(`
   if (location.protocol === 'chrome-extension:') {
@@ -144,7 +174,15 @@ await sidebar.goto(`chrome-extension://${extensionId}/sidebar.html`);
 await sidebar.waitForLoadState('load');
 
 // Backgrounded tabs don't run requestAnimationFrame; poll on an interval.
-const waitSidebar = (fn, timeout = 10000) => sidebar.waitForFunction(fn, null, { timeout, polling: 120 });
+const waitSidebar = async (fn, timeout = 10000) => {
+  try {
+    return await sidebar.waitForFunction(fn, null, { timeout, polling: 120 });
+  } catch (error) {
+    console.error('Sidebar tool result on timeout:', await toolResults());
+    console.error('Captured console errors:', consoleErrors);
+    throw error;
+  }
+};
 const toolResults = () => sidebar.$eval('#toolResults', (el) => el.textContent);
 
 async function runTool(name, args) {
@@ -174,6 +212,17 @@ check('lists iframe tool with frameId', optionText.some((t) => t.includes('echo_
 // Badge shows the tool count on the demo tab
 const badge = await sw.evaluate(async (tabId) => chrome.action.getBadgeText({ tabId }), demoTabId);
 check('badge shows tool count', badge === '6', `badge="${badge}"`);
+
+// Identical badge refreshes must not silently change the tool/arguments.
+await sidebar.selectOption('#toolNames', { value: 'echo_frame' });
+await sidebar.fill('#inputArgsText', '{"keep":true}');
+await sw.evaluate(async ({ tabId, origin }) => {
+  await chrome.tabs.sendMessage(tabId, { action: 'LIST_TOOLS', fromOrigins: [origin] }, { frameId: 0 });
+}, { tabId: demoTabId, origin: BASE });
+await sidebar.waitForTimeout(300);
+check('identical tool refresh preserves selection and arguments',
+  await sidebar.inputValue('#toolNames') === 'echo_frame' &&
+  await sidebar.inputValue('#inputArgsText') === '{"keep":true}');
 
 // Script tool, fast path
 await demo.bringToFront();

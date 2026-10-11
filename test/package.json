@@ -2,7 +2,7 @@
   "name": "model-context-tool-inspector-test",
   "private": true,
   "scripts": {
-    "test": "node e2e.mjs"
+    "test": "node messaging.mjs && node e2e.mjs"
   },
   "devDependencies": {
     "@puppeteer/browsers": "^2.10.0",
